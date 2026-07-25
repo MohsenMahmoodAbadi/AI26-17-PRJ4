@@ -1,128 +1,190 @@
-import pygame
-import time
-import random
-from pyDatalog import pyDatalog
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+if "--no-gui" in sys.argv:
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+
+from src.knowledge_base import AGENT_UNKNOWN, MinesweeperKnowledgeBase
 from src.minesweeper import MineSweeper
-
-# =========================================================================
-# Section 1: Define First-Order Logic Terms (FOL Terms)
-# Students should define the required terms, facts, and rules for pyDatalog here.
-# =========================================================================
-# Hint: pyDatalog.create_terms('X, Y, R, C, ...')
+from src.solver import LogicalMinesweeperAgent, SolverResult
 
 
-# Suggested constants for the agent's internal memory (Shadow Board)
-AGENT_UNKNOWN = -1
-AGENT_FLAGGED = -2
+SCENARIOS = {
+    "simple": {"rows": 9, "cols": 9, "mines": 9, "seed": 99},
+    "standard": {"rows": 15, "cols": 15, "mines": 35, "seed": 2},
+    "challenge": {"rows": 20, "cols": 20, "mines": 5, "seed": 23},
+    "large": {"rows": 80, "cols": 80, "mines": 200, "seed": -1},
+}
 
-# =========================================================================
-# Section 2: Generation of Logical Facts and Rules
-# =========================================================================
+_GLOBAL_KB: MinesweeperKnowledgeBase | None = None
 
-def init_static_facts(rows, cols):
-    """
-    Task 1: Generate static facts at the beginning of the game 
-    (e.g., adjacency relationships between cells).
-    """
-    pass
 
-def init_rules():
-    """
-    Task 2: Define logical inference rules (Safety Rule and Danger Rule).
-    According to the project documentation, rules must be defined based on first-order logic.
-    """
-    # Safe(R2, C2) <= (...)
-    # Mine(R2, C2) <= (...)
-    pass
+def init_static_facts(rows: int, cols: int, mines: int = 0) -> MinesweeperKnowledgeBase:
+    """Create static cell and neighbor facts for compatibility with the starter."""
+    global _GLOBAL_KB
+    _GLOBAL_KB = MinesweeperKnowledgeBase(rows, cols, mines)
+    return _GLOBAL_KB
 
-def update_knowledge_base(agent_board, rows, cols):
-    """
-    Task 3: Convert the agent's internal memory (agent_board) into dynamic facts in each turn.
-    Before adding new facts, facts from the previous turn must be cleared.
-    """
-    pass
 
-def query_solver():
-    """
-    Task 4: Query the inference engine to find safe cells and mines.
-    Output: Two lists containing the coordinates of safe cells and mine cells.
-    """
-    safe_moves = []
-    mine_moves = []
-    
-    # Code for querying Safe(R, C) and Mine(R, C)
-    
-    return safe_moves, mine_moves
-
-# =========================================================================
-# Section 3: Uncertainty Handling Strategy (Smart Guess) - Optional/Bonus
-# =========================================================================
-
-def get_safest_guess(agent_board, rows, cols):
-    """
-    Task 5 (Optional): Calculate the probability of cells being mines during a logical deadlock.
-    """
+def init_rules() -> None:
+    """Rules are implemented by forward chaining in MinesweeperKnowledgeBase."""
     return None
 
-# =========================================================================
-# Section 4: Main Agent Loop
-# =========================================================================
 
-def prolog_solver(game):
-    # Initialize static facts and rules
-    init_static_facts(game.rows, game.cols)
+def update_knowledge_base(
+    agent_board: dict[tuple[int, int], int],
+    rows: int | None = None,
+    cols: int | None = None,
+    mines: int | None = None,
+) -> dict[str, int]:
+    """Synchronize dynamic predicate facts from the agent shadow board."""
+    global _GLOBAL_KB
+    if _GLOBAL_KB is None:
+        if rows is None or cols is None:
+            raise ValueError("rows and cols are required before static facts exist")
+        _GLOBAL_KB = MinesweeperKnowledgeBase(rows, cols, mines or 0)
+    elif mines is not None:
+        _GLOBAL_KB.total_mines = mines
+    _GLOBAL_KB.sync_from_agent_board(agent_board)
+    return _GLOBAL_KB.fact_summary()
+
+
+def query_solver() -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """Query inferred Safe(R, C) and Mine(R, C) predicates."""
+    if _GLOBAL_KB is None:
+        raise RuntimeError("knowledge base is not initialized")
+    safe_moves, mine_moves = _GLOBAL_KB.infer()
+    return sorted(safe_moves), sorted(mine_moves)
+
+
+def get_safest_guess(
+    agent_board: dict[tuple[int, int], int],
+    rows: int,
+    cols: int,
+    mines: int = 0,
+) -> tuple[int, int] | None:
+    kb = MinesweeperKnowledgeBase(rows, cols, mines)
+    kb.sync_from_agent_board(agent_board)
+    kb.infer()
+    return kb.choose_safest_guess()
+
+
+def prolog_solver(
+    game: MineSweeper,
+    allow_guess: bool = True,
+    render: bool = True,
+    delay: float = 0.0,
+    verbose: bool = True,
+    max_steps: int | None = None,
+) -> SolverResult:
+    """Run the automatic logical solver on a MineSweeper instance."""
+    init_static_facts(game.rows, game.cols, game.total_mines)
     init_rules()
-    
-    # Create agent's internal memory (Shadow Board) - initially all cells are unknown
-    agent_board = {}
-    for r in range(game.rows):
-        for c in range(game.cols):
-            agent_board[(r, c)] = AGENT_UNKNOWN
+    agent = LogicalMinesweeperAgent(
+        game=game,
+        allow_guess=allow_guess,
+        render=render,
+        delay=delay,
+        verbose=verbose,
+        max_steps=max_steps,
+    )
+    return agent.run()
 
-    # Get starting position (Guaranteed to be 0 and safe according to the project documentation)
-    start_r, start_c = game.get_start_pos()
-    print(f"Starting at guaranteed safe position: {start_r}, {start_c}")
-    
-    # First move: Reveal the starting cell and record it in the agent's memory
-    start_val = game.reveal(start_r, start_c)
-    agent_board[(start_r, start_c)] = start_val if start_val is not None else 0
-    
-    running = True
-    while running and not game.game_over:
-        # Handle Pygame events to prevent the window from freezing/crashing
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
 
-        # 1. Update the knowledge base based on the latest state of the agent's memory
-        update_knowledge_base(agent_board, game.rows, game.cols)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Minesweeper FOL solver")
+    parser.add_argument("--mode", choices=("auto", "manual"), default="auto")
+    parser.add_argument("--scenario", choices=tuple(SCENARIOS), default=None)
+    parser.add_argument("--rows", type=int, default=None)
+    parser.add_argument("--cols", type=int, default=None)
+    parser.add_argument("--mines", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--auto-flood-fill", action="store_true")
+    parser.add_argument("--no-gui", action="store_true")
+    parser.add_argument("--no-render", action="store_true")
+    parser.add_argument("--delay", type=float, default=0.0)
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--no-guess", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--show-board", action="store_true")
+    return parser
 
-        # 2. Query the logic engine
-        safe_moves, mine_moves = query_solver()
-        move_made = False
 
-        # 3. Apply the extracted logical actions to the game environment and update memory
-        # Hint: Reveal safe cells first, then flag the mine cells.
-        
-        # 4. Deadlock management (if no deterministic logical move is found)
-        if not move_made and not game.game_over:
-            print("Logical deadlock! Attempting guess...")
-            # First use the Heuristic, and if no data is available, make a completely random choice
-            pass
+def resolve_config(args: argparse.Namespace) -> dict[str, int]:
+    config = dict(SCENARIOS.get(args.scenario or "simple", SCENARIOS["simple"]))
+    for key in ("rows", "cols", "mines", "seed"):
+        value = getattr(args, key)
+        if value is not None:
+            config[key] = value
+    return config
 
-        # Render the environment and add a short delay to observe the solving process
-        game.render()
-        time.sleep(0.2)
 
-    # Keep the window open after the game ends
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-        game.render()
+def run_auto(args: argparse.Namespace) -> SolverResult:
+    config = resolve_config(args)
+    game = MineSweeper(
+        rows=config["rows"],
+        cols=config["cols"],
+        mines=config["mines"],
+        seed=config["seed"],
+        auto_flood_fill=args.auto_flood_fill,
+        enable_gui=not args.no_gui,
+    )
+    result = prolog_solver(
+        game,
+        allow_guess=not args.no_guess,
+        render=not args.no_render and not args.no_gui,
+        delay=args.delay,
+        verbose=not args.quiet,
+        max_steps=args.max_steps,
+    )
+
+    print(format_result(result, config))
+    if args.show_board:
+        print(game.render_text(show_mines=game.game_over))
+    return result
+
+
+def run_manual(args: argparse.Namespace) -> None:
+    if args.no_gui:
+        raise ValueError("manual mode requires the GUI")
+    from manual import ManualController
+
+    config = resolve_config(args)
+    controller = ManualController(
+        rows=config["rows"],
+        cols=config["cols"],
+        mines=config["mines"],
+        seed=config["seed"],
+        auto_flood_fill=True,
+    )
+    controller.run()
+
+
+def format_result(result: SolverResult, config: dict[str, int]) -> str:
+    status = "victory" if result.victory else "loss" if result.lost else "stopped"
+    return (
+        f"Result: {status} | board={config['rows']}x{config['cols']} "
+        f"mines={config['mines']} seed={config['seed']} | "
+        f"steps={result.steps} deterministic={result.deterministic_moves} "
+        f"guesses={result.guesses} revealed={result.revealed} "
+        f"flagged={result.flagged} progress={result.progress:.1%}"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.mode == "manual":
+        run_manual(args)
+    else:
+        run_auto(args)
+    return 0
+
 
 if __name__ == "__main__":
-    # Default settings based on the first scenario (Simple level) in the evaluation table
-    # Note: auto_flood_fill must be False to preserve the encapsulation of the agent's memory.
-    ms = MineSweeper(rows=9, cols=9, mines=10, seed=99, auto_flood_fill=False)
-    prolog_solver(ms)
+    raise SystemExit(main())
